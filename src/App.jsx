@@ -5,6 +5,7 @@ import Toasts from './ui/Toasts';
 import ErrorBoundary from './ui/ErrorBoundary';
 import { useAuth, PHASE } from './hooks/useAuth';
 import { LOGO } from './constants/logo';
+import { SpeedInsights } from '@vercel/speed-insights/react';
 
 import './styles/theme.css';
 
@@ -54,6 +55,7 @@ export default function App() {
       <AppProvider>
         <AppInner />
       </AppProvider>
+      <SpeedInsights />
     </ErrorBoundary>
   );
 }
