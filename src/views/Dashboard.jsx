@@ -1,11 +1,10 @@
-import { useState, useEffect, useRef, lazy, Suspense } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import {
   useRequests, useChat, useAvatar, useActions,
 } from '../store/AppStore';
 import { ROLE_LABELS } from '../constants';
 import { canManageRequests } from '../constants/requestPredicates';
-import { ROLES, isStaff } from '../domain/permissions';
-import { sendNotif, playAlert } from '../utils';
+import { ROLES } from '../domain/permissions';
 import { AvatarCircle } from '../ui/AvatarCircle';
 import { AvatarModal } from '../ui/Modals';
 import { toast } from '../ui/Toasts';
@@ -13,11 +12,8 @@ import ErrorBoundary from '../ui/ErrorBoundary';
 import ResidentView from './ResidentView';
 import { ConciergeView, SecurityView } from './SecurityConciergeViews';
 import { LOGO } from '../constants/logo';
-import {
-  FB_MODE,
-  subscribeRequests, subscribeChat,
-  fetchAllUsers, fetchPerms, fetchTemplates,
-} from '../services/firebaseService';
+import { FB_MODE } from '../services/firebaseService';
+import { useDashboardRuntime } from './dashboard/useDashboardRuntime';
 
 const AdminView = lazy(() => import('./AdminView'));
 
@@ -78,100 +74,22 @@ export default function Dashboard({ user, onLogout }) {
   const lastSeen   = chatLastSeen[user.uid] || 0;
   const unreadMsgs = chat.filter(m => m.uid !== user.uid && new Date(m.at).getTime() > lastSeen).length;
 
-  const prevPendingT = useRef(pendingT);
-  const prevPendingP = useRef(pendingP);
-  const prevMsgs     = useRef(chat.length);
-
-  // ── Активация отложенных заявок ──────────────────────────────────────────
-  const requestsRef = useRef(requests);
-  requestsRef.current = requests;
-
-  useEffect(() => {
-    activateScheduled();
-    const id = setInterval(() => {
-      if (requestsRef.current.some(r => r.status === 'scheduled')) activateScheduled();
-    }, 30000);
-    return () => clearInterval(id);
-  }, [activateScheduled]);
-
-  // ── PWA App Badge ─────────────────────────────────────────────────────────
-  useEffect(() => {
-    const total = canManageRequests(user.role) ? pendingT + pendingP : unreadMsgs;
-    if ('setAppBadge' in navigator) {
-      if (total > 0) navigator.setAppBadge(total).catch(() => {});
-      else           navigator.clearAppBadge().catch(() => {});
-    }
-  }, [pendingT, pendingP, unreadMsgs, user.role]);
-
-  // ── Push-уведомления (demo) ───────────────────────────────────────────────
-  const notifTimer = useRef(null);
-  useEffect(() => {
-    if (FB_MODE === 'live') return;
-    // Debounce 300ms — если несколько заявок создаются быстро, уведомляем один раз
-    clearTimeout(notifTimer.current);
-    notifTimer.current = setTimeout(() => {
-      if (pendingP > prevPendingP.current && user.role === ROLES.SECURITY) {
-        sendNotif('Новый пропуск', 'Требует рассмотрения', 'pass'); playAlert('pass');
-      }
-      prevPendingP.current = pendingP;
-
-      if (pendingT > prevPendingT.current && canManageRequests(user.role)) {
-        sendNotif('Техзаявка', 'Новая заявка в техслужбу', 'tech'); playAlert('tech');
-      }
-      prevPendingT.current = pendingT;
-
-      if (chat.length > prevMsgs.current) {
-        const last = chat[chat.length - 1];
-        if (last && last.uid !== user.uid) sendNotif('Сообщение от ' + last.name, last.text.slice(0, 60), 'chat');
-      }
-      prevMsgs.current = chat.length;
-    }, 300);
-    return () => clearTimeout(notifTimer.current);
-  }, [pendingP, pendingT, chat, user.role, user.uid]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Уведомление жильцу при входе гостя ────────────────────────────────────
-  const prevArrivedIds = useRef(new Set(
-    requests.filter(r => r.arrivedAt).map(r => r.id)
-  ));
-  useEffect(() => {
-    if (isStaff(user.role)) return; // только для жильцов
-    const arrivedNow = requests.filter(r => r.arrivedAt && r.createdByUid === user.uid);
-    for (const r of arrivedNow) {
-      if (!prevArrivedIds.current.has(r.id)) {
-        prevArrivedIds.current.add(r.id);
-        const who = r.visitorName || r.category;
-        sendNotif('Гость на территории', who + ' — вход отмечен', 'arrival');
-        playAlert('pass');
-      }
-    }
-  }, [requests, user.uid, user.role]);
-
-  // ── Firebase live subscriptions ───────────────────────────────────────────
-  useEffect(() => {
-    if (FB_MODE !== 'live') return;
-    const unsubReqs = subscribeRequests(docs => {
-      const newP = docs.filter(r => r.type === 'pass' && r.status === 'pending').length;
-      if (newP > prevPendingP.current && user.role === ROLES.SECURITY) { sendNotif('Новый пропуск', 'Требует рассмотрения', 'pass'); playAlert('pass'); }
-      prevPendingP.current = newP;
-      const newT = docs.filter(r => r.type === 'tech' && r.status === 'pending').length;
-      if (newT > prevPendingT.current && canManageRequests(user.role)) { sendNotif('Техзаявка', 'Новая заявка в техслужбу', 'tech'); playAlert('tech'); }
-      prevPendingT.current = newT;
-      setAllRequests(docs);
-    });
-    const unsubChat = subscribeChat(docs => {
-      const newM = docs.length;
-      if (newM > prevMsgs.current) {
-        const last = docs[docs.length - 1];
-        if (last && last.uid !== user.uid) sendNotif('Сообщение от ' + last.name, last.text.slice(0, 60), 'chat');
-        prevMsgs.current = newM;
-      }
-      setAllMessages(docs);
-    });
-    fetchAllUsers().then(u => { if (u.length) setAllUsers(u); }).catch(() => {});
-    fetchPerms(user.uid).then(p => setPerms(user.uid, p)).catch(() => {});
-    fetchTemplates(user.uid).then(items => setTemplates(user.uid, items)).catch(() => {});
-    return () => { unsubReqs(); unsubChat(); };
-  }, [user.role, user.uid, setAllRequests, setAllMessages, setAllUsers, setPerms, setTemplates]);
+  useDashboardRuntime({
+    user,
+    requests,
+    chat,
+    unreadMsgs,
+    pendingP,
+    pendingT,
+    actions: {
+      activateScheduled,
+      setAllRequests,
+      setAllMessages,
+      setAllUsers,
+      setPerms,
+      setTemplates,
+    },
+  });
 
   // ── Навигация ─────────────────────────────────────────────────────────────
   const NAV = {
